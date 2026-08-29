@@ -1,0 +1,26 @@
+.env
+.env.*
+!.env.example
+*.pyc
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Runtime state — never commit credentials, tokens or live state
+data/cache/*
+data/journal/*
+data/models/*
+data/experiments/*
+!data/**/.gitkeep
+*.sqlite
+*.sqlite3
+*.db
+*.log
+.aqtp_token_cache.json
+config/local.yaml
+config/live.yaml

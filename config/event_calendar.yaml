@@ -1,0 +1,48 @@
+# Event calendar consumed by the EventRisk engine (REQ 37).
+#
+# This is a CONTROLLED data source. The platform never scrapes the web inside the
+# execution loop — it reads this file, which you maintain (by hand or from your own
+# pipeline). The file is re-read when its mtime changes, so edits take effect
+# without restarting the bot.
+#
+# Fields:
+#   name       required
+#   timestamp  required — "YYYY-MM-DD HH:MM" (IST), or a bare date for a whole day
+#   impact     low | medium | high      (default: medium)
+#   category   macro | policy | corporate | index
+#   affected   list of underlyings; omit for market-wide events
+#
+# Behaviour around an event is set in config/default.yaml under `event_risk`:
+#   blackout_minutes_before / after, and high_impact_action
+#   (block_new | reduce_risk | close_positions | continue)
+
+events: []
+
+# Example entries — replace with your own calendar:
+#
+# events:
+#   - name: RBI Monetary Policy Decision
+#     timestamp: 2026-10-08 10:00
+#     impact: high
+#     category: policy
+#
+#   - name: US Fed FOMC Decision
+#     timestamp: 2026-10-29 23:30
+#     impact: high
+#     category: macro
+#
+#   - name: India CPI Inflation Release
+#     timestamp: 2026-10-12 17:30
+#     impact: medium
+#     category: macro
+#
+#   - name: TCS Q2 Results
+#     timestamp: 2026-10-11 16:00
+#     impact: high
+#     category: corporate
+#     affected: [TCS]
+#
+#   - name: Union Budget
+#     timestamp: 2027-02-01
+#     impact: high
+#     category: policy

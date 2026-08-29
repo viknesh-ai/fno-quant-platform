@@ -1,0 +1,195 @@
+# =============================================================================
+# AQTP default configuration.
+#
+# PAPER is the default mode. LIVE cannot be enabled from this file alone — it
+# additionally requires three environment interlocks (see .env.example).
+#
+# Nothing here is baked into the code: change a value, restart, and the system
+# behaves differently. Every field is validated at startup.
+# =============================================================================
+
+mode: PAPER
+run_name: default
+log_level: INFO
+json_logs: false
+
+broker:
+  name: groww
+  auth_mode: token
+  timeout_seconds: 10.0
+  max_retries: 3
+
+capital:
+  # The only number you must set. The bot cross-checks it against broker margin.
+  available_capital: 500000
+  max_capital_deployment_pct: 0.60
+  use_broker_equity: true
+  broker_equity_tolerance_pct: 0.20
+
+risk:
+  risk_per_trade_pct: 0.01          # 1% of equity at risk per trade
+  max_daily_loss_pct: 0.03
+  max_portfolio_drawdown_pct: 0.10
+  max_open_positions: 4
+  max_exposure_per_instrument_pct: 0.20
+  max_exposure_per_underlying_pct: 0.30
+  max_correlated_exposure_pct: 0.40
+  max_sector_exposure_pct: 0.40
+  max_margin_utilization_pct: 0.70
+  max_position_size_pct: 0.25
+  max_spread_pct: 0.015
+  max_slippage_pct: 0.005
+  min_liquidity_volume: 5000
+  min_open_interest: 1000
+  max_consecutive_losses: 4
+  max_trades_per_day: 20
+  cooldown_minutes_after_loss: 10
+  drawdown_level2_pct: 0.04
+  drawdown_level3_pct: 0.07
+  drawdown_level4_pct: 0.10
+  level2_risk_multiplier: 0.5
+
+universe:
+  index_underlyings: [NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, NIFTYNXT50]
+  include_stock_fno: true
+  stock_underlyings_allowlist: []   # empty = every F&O stock the broker lists
+  stock_underlyings_blocklist: []
+  include_futures: true
+  include_options: true
+  max_universe_size: 120
+  refresh_interval_minutes: 360
+  max_expiries_ahead: 3
+  min_days_to_expiry: 0
+  max_days_to_expiry: 45
+
+timeframes:
+  regime_timeframe: 1h
+  setup_timeframe: 15m
+  entry_timeframe: 5m
+  enabled_timeframes: [1m, 3m, 5m, 10m, 15m, 30m, 1h, 4h, 1d]
+  history_bars: 400
+
+data_quality:
+  max_quote_age_seconds: 15.0
+  max_greeks_age_seconds: 60.0
+  max_spread_pct: 0.05
+  max_price_jump_pct: 0.20
+  min_price: 0.05
+  require_depth: false
+  max_consecutive_failures: 3
+
+strategies:
+  trend_following:      { enabled: true,  weight: 1.0 }
+  momentum:             { enabled: true,  weight: 1.0 }
+  breakout:             { enabled: true,  weight: 1.0 }
+  mean_reversion:       { enabled: true,  weight: 0.8 }
+  volatility_expansion: { enabled: true,  weight: 0.8 }
+  market_structure:     { enabled: true,  weight: 1.0 }
+  vwap:                 { enabled: true,  weight: 0.9 }
+  options_flow:         { enabled: true,  weight: 0.7 }
+  expiry:               { enabled: true,  weight: 0.7 }
+
+ensemble:
+  min_strategy_agreement: 0.5
+  min_strategies_agreeing: 2
+  min_ensemble_confidence: 0.55
+  ml_weight: 0.5
+  strategy_weight: 0.5
+  correlation_discount: 0.6
+
+prediction:
+  horizons_minutes: [15, 30, 60]
+  target_atr_multiple: 1.5
+  stop_atr_multiple: 1.0
+  min_movement_atr: 0.25
+  volatility_adjusted: true
+  labeling: triple_barrier
+  min_model_probability: 0.58
+
+models:
+  families: [logistic_regression, random_forest, gradient_boosting, lightgbm]
+  calibration: isotonic
+  walk_forward_train_days: 120
+  walk_forward_validation_days: 20
+  walk_forward_test_days: 20
+  walk_forward_step_days: 20
+  embargo_minutes: 60
+  random_seed: 42
+  min_training_samples: 500
+  max_brier_score: 0.26
+  min_roc_auc: 0.53
+  regime_specific_models: false
+
+option_selection:
+  strike_offsets: [-2, -1, 0, 1, 2]
+  consider_expiries: 2
+  min_delta: 0.25
+  max_delta: 0.75
+  max_spread_pct: 0.012   # must stay <= risk.max_spread_pct
+  min_volume: 500
+  min_open_interest: 1000
+  max_theta_to_premium_ratio: 0.06
+  max_iv_percentile: 0.85
+  min_expected_move_to_premium: 1.2
+
+execution:
+  default_product: NRML
+  entry_order_type: LIMIT
+  limit_price_buffer_pct: 0.003
+  max_acceptable_slippage_pct: 0.004
+  order_fill_timeout_seconds: 20.0
+  cancel_unfilled_after_timeout: true
+  verify_fill_before_recording: true
+  reconcile_interval_seconds: 60.0
+  loop_interval_seconds: 5.0
+  min_feature_change_to_reevaluate: 0.15
+
+costs:
+  # Verify against your current Groww contract note / NSE circulars before LIVE.
+  brokerage_per_order: 20.0
+  slippage_model: spread_fraction
+  slippage_spread_fraction: 0.5
+
+expected_value:
+  min_expected_value_rupees: 0.0
+  min_expected_value_r_multiple: 0.15
+  min_risk_reward: 1.4
+
+session:
+  trading_start: "09:20:00"
+  no_new_entries_after: "14:45:00"
+  trading_end: "15:10:00"
+  square_off_time: "15:15:00"
+  avoid_first_minutes: 5
+
+event_risk:
+  enabled: true
+  source: file
+  calendar_path: config/event_calendar.yaml
+  blackout_minutes_before: 30
+  blackout_minutes_after: 15
+  high_impact_action: block_new
+
+strategy_health:
+  lookback_trades: 30
+  min_trades_for_judgement: 12
+  reduce_below_expectancy_r: -0.05
+  pause_below_expectancy_r: -0.20
+  disable_below_expectancy_r: -0.40
+
+scanner:
+  min_opportunity_score: 0.60
+  max_opportunities_per_cycle: 5
+
+monitoring:
+  dashboard_enabled: true
+  dashboard_host: 127.0.0.1
+  dashboard_port: 8787
+  alerts_enabled: true
+  alert_channels: [log, file]
+
+backtest:
+  initial_capital: 500000
+  latency_ms: 250
+  fill_model: next_bar_open
+  monte_carlo_runs: 500
