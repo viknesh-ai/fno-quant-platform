@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -23,6 +24,9 @@ from ..core.types import Decision, Direction, Instrument, Quote
 from ..ml.predict import Prediction
 from ..regime.engine import RegimeState
 from ..signals.ensemble import EnsembleResult
+
+if TYPE_CHECKING:
+    from ..analysis.engine import AnalysisReport
 
 logger = get_logger(__name__)
 
@@ -40,6 +44,7 @@ class Opportunity:
     ensemble: EnsembleResult | None = None
     prediction: Prediction | None = None
     regime: RegimeState | None = None
+    analysis: "AnalysisReport | None" = None
     quote: Quote | None = None
     expected_return: float = 0.0
     expected_risk: float = 0.0
@@ -113,6 +118,7 @@ class OpportunityScanner:
         capital_required: float = 0.0,
         available_capital: float = 0.0,
         timestamp: datetime | None = None,
+        analysis: "AnalysisReport | None" = None,
     ) -> Opportunity:
         """Score one candidate across the dimensions REQ 22 lists."""
         opportunity = Opportunity(
@@ -127,6 +133,7 @@ class OpportunityScanner:
             quote=quote,
             capital_required=capital_required,
             timestamp=timestamp,
+            analysis=analysis,
         )
 
         if not ensemble.is_tradable:
@@ -148,6 +155,15 @@ class OpportunityScanner:
             components["ml"] = 0.3
 
         components["regime_fit"] = float(np.clip(regime.confidence, 0.0, 1.0))
+
+        # The deep-analysis confluence, scored for the direction actually taken.
+        # Absent analysis scores a neutral 0.4 rather than 0 so that a symbol the
+        # analysis layer could not read is ranked below one it endorses, but is
+        # not eliminated outright.
+        if analysis is not None:
+            components["analysis"] = float(np.clip(analysis.supports(ensemble.direction), 0.0, 1.0))
+        else:
+            components["analysis"] = 0.4
 
         liquidity, spread_score, execution_quality = self._execution_scores(quote)
         opportunity.liquidity_score = liquidity

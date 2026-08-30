@@ -1,0 +1,57 @@
+# systemd unit for a production AQTP session.
+#
+#   sudo cp deploy/aqtp.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now aqtp
+#   journalctl -u aqtp -f
+#
+# The LIVE interlocks live in the EnvironmentFile, not here, so that starting the
+# service is still a deliberate act by whoever wrote that file. Keep it 0600 and
+# owned by the service user — it holds the broker token.
+
+[Unit]
+Description=AQTP — adaptive quantitative F&O trading platform
+Documentation=file:///opt/aqtp/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aqtp
+Group=aqtp
+WorkingDirectory=/opt/aqtp
+
+# Credentials and the three LIVE interlocks. chmod 600.
+EnvironmentFile=/etc/aqtp/aqtp.env
+
+# --yes skips the typed confirmation, which is impossible under systemd. The
+# interlocks in the EnvironmentFile are what make this safe: without them the
+# process refuses to start at all.
+ExecStart=/opt/aqtp/.venv/bin/aqtp start --config /opt/aqtp/config/default.yaml --yes
+
+# SIGTERM stops at a cycle boundary and runs the configured shutdown policy;
+# give it time to cancel orders and (if configured) square off.
+KillSignal=SIGTERM
+TimeoutStopSec=120
+Restart=on-failure
+RestartSec=15
+# A crash loop must not be allowed to spam the broker's rate limit.
+StartLimitIntervalSec=300
+StartLimitBurst=4
+
+# The Groww token expires at 06:00 IST daily. Restarting just after that picks up
+# a freshly minted one when auth_mode is approval or totp.
+RuntimeMaxSec=0
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/aqtp/data /opt/aqtp/logs
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aqtp
+
+[Install]
+WantedBy=multi-user.target

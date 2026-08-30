@@ -98,7 +98,7 @@ Status key: **Done** · **Partial** (implemented with a stated gap) · **Interfa
 | 7. Prefer configurable implementations | ~200 config fields, zero magic numbers in logic |
 | 8–12. Never hard-code capital/instrument/strategy/expiry/lot size | all discovered or configured; verified by tests |
 | 13. No broker assumptions outside the adapter | No Groww API logic outside `brokers/`. Three benign residues, listed for honesty: `Instrument.groww_symbol` (an optional identifier field), the `GROWW_` env-var prefix in `logging.py`/`loader.py` (credentials), and a comment in `ids.py` noting that client order ids are constrained to 8–20 alphanumerics — a safe subset for any broker, enforced generically. |
-| 14–16. Tests for critical components, run and fixed | 256 tests, all green |
+| 14–16. Tests for critical components, run and fixed | 388 tests, all green |
 | 17. Never claim profitability without OOS evidence | `ModelRegistry.promote` refuses to activate a failed model |
 | 18. Never optimize against final test data | family selection uses validation folds only |
 | 19–20. No look-ahead / future information | 15 dedicated leakage tests |
@@ -109,7 +109,26 @@ Status key: **Done** · **Partial** (implemented with a stated gap) · **Interfa
 | 27. No duplicate orders after API failure | idempotency guard + ambiguity handling |
 | 28. Always reconcile broker state | startup + periodic |
 | 29. Modes isolated | mode-based broker routing |
-| 30. LIVE never default | PAPER default + 3 interlocks |
+| 30. LIVE never default *from configuration alone* | `config/default.yaml` ships `mode: LIVE` (this is a production system), but the mode alone is inert: `AppConfig` refuses to construct without all three `AQTP_LIVE_CONFIRM_*` interlocks, and the CLI additionally requires a typed phrase. The config declares intent; the environment declares consent. `test_data_quality.py::TestConfiguration` |
+
+## Additions beyond the specification
+
+These are not in `REQUIREMENTS.md`. They were added to make the platform
+production-viable and are listed here so the matrix stays honest about what is
+required versus what is extra.
+
+| Subsystem | Rationale | Implementation | Verified by |
+|---|---|---|---|
+| Deep analysis — statistical | REQ 10 asks for features; features assume a model. These estimators test whether the model holds. | `analysis/statistics.py` | `test_analysis.py::TestStatisticalEstimators` (9 tests) |
+| Deep analysis — volume profile | Where price traded by *value*, not by time — REQ 10's structure block has no volume-at-price. | `analysis/volume_profile.py` | `test_analysis.py::TestVolumeProfile` (6 tests) |
+| Deep analysis — microstructure | REQ 8 gates on spread; the book carries far more than spread, and execution cost is part of the edge. | `analysis/microstructure.py` | `test_analysis.py::TestMicrostructure` (7 tests) |
+| Deep analysis — dealer positioning | REQ 12.8 says OI alone does not predict direction. Dealer gamma says what hedging flow will *do*, which is a different claim. | `analysis/options_analytics.py` | `test_analysis.py::TestOptionsAnalytics` (9 tests) |
+| Deep analysis — cross-asset | REQ 30 caps correlated exposure using a static map; live correlation measures it. | `analysis/crossasset.py` | `test_analysis.py::TestCrossAsset` (5 tests) |
+| Confluence combination | REQ 13 forbids double-counting correlated indicators. This generalises that to dimensions and makes conflict visible. | `analysis/confluence.py` | `test_analysis.py::TestConfluence` (7 tests) |
+| Bounded analysis authority | The analysis must not become an unaudited override of the risk and agreement gates. | `signals/ensemble.py` | `test_analysis_gate.py` (11 tests) |
+| Manual order entry | An operator needs to act; the requirement is that acting does not bypass the risk engine. | `execution/manual.py`, `cli/trade.py` | `test_manual_trading.py` (28 tests), `test_cli_safety.py` (16 tests) |
+| Runtime supervision | REQ 63/64 cover startup and reconciliation; nothing covered keeping the process alive for a full session. | `runtime/supervisor.py` | `test_supervisor.py` (21 tests) |
+| Deployment | REQ 41 requires the mode be unambiguous in production; a unit file and image make that reproducible. | `deploy/` | manual |
 
 ## Open items (stated, not hidden)
 
@@ -119,7 +138,9 @@ Status key: **Done** · **Partial** (implemented with a stated gap) · **Interfa
    the operator to run PAPER mode against live market data and review the journal.
 2. **REQ 33 — event-driven feed.** Latency measurement is complete. The loop polls
    rather than consuming a streaming feed, because Groww's documented API surface is
-   REST. No feed contract was invented (REQ 3).
+   REST. No feed contract was invented (REQ 3). This bounds the microstructure
+   dimension: order-flow imbalance is computed from successive quote snapshots and
+   trade side is inferred by the tick rule, not observed.
 3. **REQ 56 — cost rates.** Configurable defaults from published schedules; must be
    re-verified against a current contract note before LIVE.
 4. **Short-option margin** is not simulated (see ARCHITECTURE.md §6.1).

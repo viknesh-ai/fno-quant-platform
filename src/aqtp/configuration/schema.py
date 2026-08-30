@@ -3,8 +3,10 @@
 Design rules encoded here:
   * Nothing about capital, instruments, strategies, expiries or lot sizes is
     hard-coded — every one of them is a field with a conservative default.
-  * `TradingMode.PAPER` is the default and `LIVE` requires three independent
-    environment interlocks (REQ 43).
+  * `TradingMode.LIVE` is the default — this is a production trading system.
+    LIVE still requires three environment interlocks (REQ 43) so that a stray
+    `python -c` cannot start a session, but LIVE is the mode the platform is
+    built and tuned for. PAPER remains available for dry runs.
   * Validation is total: the bot refuses to start on an inconsistent config rather
     than silently correcting it.
 """
@@ -380,6 +382,115 @@ class PathsConfig(StrictModel):
     state_file: str = "data/state.json"
 
 
+class AnalysisConfig(StrictModel):
+    """Deep-analysis layer (`aqtp.analysis`).
+
+    Every dimension can be switched off, and the weights say how much each one
+    counts toward the combined conviction. They are normalised over whichever
+    dimensions actually reported, so they need not sum to 1.
+    """
+
+    enabled: bool = True
+    benchmark: str = "NIFTY"
+    vix_symbol: str = "INDIAVIX"
+
+    # --- dimension weights -------------------------------------------------
+    dimension_weights: dict[str, float] = Field(
+        default_factory=lambda: {
+            "trend": 0.16,
+            "momentum": 0.14,
+            "structure": 0.14,
+            "orderflow": 0.16,
+            "positioning": 0.14,
+            "statistical": 0.10,
+            "volatility": 0.08,
+            "crossasset": 0.08,
+        }
+    )
+    min_dimensions: int = Field(4, ge=1, le=8)
+    conflict_penalty: float = Field(0.5, ge=0.0, le=1.0)
+
+    # --- how the conviction is used ---------------------------------------
+    min_conviction: float = Field(0.20, ge=0.0, le=1.0)
+    # How much the analysis is allowed to move an ensemble score, as a fraction.
+    # 0.0 makes the layer advisory only; 1.0 lets it halve or double a signal.
+    influence: float = Field(0.50, ge=0.0, le=1.0)
+    veto_enabled: bool = True
+    require_direction_agreement: bool = True
+
+    # --- sub-module settings ----------------------------------------------
+    volume_profile_bins: int = Field(60, ge=10, le=200)
+    value_area_pct: float = Field(0.70, gt=0.0, lt=1.0)
+    microstructure_history: int = Field(120, ge=10, le=2000)
+    statistical_lookback_bars: int = Field(240, ge=60)
+
+    # --- veto thresholds ---------------------------------------------------
+    max_spread_pct: float = Field(0.02, gt=0, le=1.0)
+    max_jump_sigmas: float = Field(5.0, gt=0)
+    min_tradability: float = Field(0.15, ge=0.0, le=1.0)
+    max_pin_risk: float = Field(0.75, ge=0.0, le=1.0)
+    max_quote_age_seconds: float = Field(20.0, gt=0)
+
+    @model_validator(mode="after")
+    def _weights_are_sane(self) -> "AnalysisConfig":
+        known = {
+            "trend", "momentum", "structure", "orderflow",
+            "positioning", "statistical", "volatility", "crossasset",
+        }
+        unknown = set(self.dimension_weights) - known
+        if unknown:
+            raise ValueError(f"unknown analysis dimension(s): {sorted(unknown)}")
+        if any(w < 0 for w in self.dimension_weights.values()):
+            raise ValueError("analysis dimension weights cannot be negative")
+        if sum(self.dimension_weights.values()) <= 0:
+            raise ValueError("at least one analysis dimension must carry weight")
+        return self
+
+
+class RuntimeConfig(StrictModel):
+    """Production process behaviour (REQ 41/63/64).
+
+    These are the settings that decide whether the bot survives a bad afternoon:
+    how fast it loops, how long it tolerates a dead broker session, and what it
+    does to open positions when the process is told to stop.
+    """
+
+    # --- loop pacing --------------------------------------------------------
+    fast_loop_seconds: float = Field(2.0, gt=0, le=60)
+    idle_loop_seconds: float = Field(15.0, gt=0, le=300)
+    # Positions are re-evaluated at the fast interval regardless of the scan
+    # interval: a stop must not wait behind a forty-symbol scan.
+    position_check_seconds: float = Field(2.0, gt=0, le=60)
+    heartbeat_seconds: float = Field(30.0, gt=0, le=600)
+
+    # --- resilience ---------------------------------------------------------
+    max_consecutive_cycle_errors: int = Field(10, ge=1)
+    reconnect_backoff_seconds: float = Field(2.0, gt=0)
+    reconnect_max_backoff_seconds: float = Field(60.0, gt=0)
+    max_reconnect_attempts: int = Field(20, ge=1)
+    # If no cycle completes within this many seconds the watchdog trips.
+    watchdog_timeout_seconds: float = Field(180.0, gt=0)
+    watchdog_action: Literal["alert", "halt", "flatten"] = "halt"
+
+    # --- shutdown -----------------------------------------------------------
+    square_off_on_shutdown: bool = False
+    cancel_open_orders_on_shutdown: bool = True
+    shutdown_grace_seconds: float = Field(20.0, ge=0)
+
+    # --- process ------------------------------------------------------------
+    pid_file: str = "data/aqtp.pid"
+    state_snapshot_seconds: float = Field(60.0, gt=0)
+    auto_square_off_before_close: bool = True
+
+    @model_validator(mode="after")
+    def _pacing_is_consistent(self) -> "RuntimeConfig":
+        if self.idle_loop_seconds < self.fast_loop_seconds:
+            raise ValueError("idle_loop_seconds must be >= fast_loop_seconds")
+        if self.reconnect_max_backoff_seconds < self.reconnect_backoff_seconds:
+            raise ValueError("reconnect_max_backoff_seconds must be >= reconnect_backoff_seconds")
+        return self
+
+
 class ScannerConfig(StrictModel):
     """REQ 22."""
 
@@ -387,12 +498,13 @@ class ScannerConfig(StrictModel):
     max_opportunities_per_cycle: int = Field(5, ge=1)
     weights: dict[str, float] = Field(
         default_factory=lambda: {
-            "strategy": 0.25,
-            "ml": 0.25,
-            "regime_fit": 0.15,
-            "liquidity": 0.15,
-            "expected_return": 0.10,
-            "execution_quality": 0.10,
+            "strategy": 0.20,
+            "ml": 0.20,
+            "analysis": 0.20,
+            "regime_fit": 0.12,
+            "liquidity": 0.12,
+            "expected_return": 0.08,
+            "execution_quality": 0.08,
         }
     )
 
@@ -423,7 +535,7 @@ class BacktestConfig(StrictModel):
 class AppConfig(StrictModel):
     """Root configuration object. One instance is threaded through the system."""
 
-    mode: TradingMode = TradingMode.PAPER
+    mode: TradingMode = TradingMode.LIVE
     run_name: str = "default"
     log_level: str = "INFO"
     json_logs: bool = False
@@ -446,6 +558,8 @@ class AppConfig(StrictModel):
     event_risk: EventRiskConfig = Field(default_factory=EventRiskConfig)
     strategy_health: StrategyHealthConfig = Field(default_factory=StrategyHealthConfig)
     scanner: ScannerConfig = Field(default_factory=ScannerConfig)
+    analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
+    runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
@@ -511,8 +625,9 @@ class AppConfig(StrictModel):
         if missing:
             raise ValueError(
                 "LIVE mode refused. The following environment interlocks are missing or "
-                f"incorrect: {missing}. Set each to its documented value (see .env.example). "
-                "LIVE is never the default and cannot be enabled by config file alone."
+                f"incorrect: {missing}. Set each to its documented value (see .env.example), "
+                "or run `aqtp arm` to print them. LIVE is the configured default, but it "
+                "cannot be entered from a config file alone."
             )
         if self.broker.name == "simulated":
             raise ValueError("LIVE mode cannot run against the simulated broker")

@@ -23,13 +23,18 @@ from datetime import datetime
 
 import numpy as np
 
-from ..configuration.schema import EnsembleConfig
+from typing import TYPE_CHECKING
+
+from ..configuration.schema import AnalysisConfig, EnsembleConfig
 from ..core.logging import get_logger
 from ..core.types import Decision, Direction, Regime
 from ..ml.predict import Prediction
 from ..regime.engine import RegimeState
 from ..strategies.base import StrategySignal
 from ..strategies.health import StrategyHealthMonitor
+
+if TYPE_CHECKING:                     # avoids a cycle: analysis imports nothing here
+    from ..analysis.engine import AnalysisReport
 
 logger = get_logger(__name__)
 
@@ -54,6 +59,9 @@ class EnsembleResult:
     expected_holding_minutes: int = 30
     regime: Regime = Regime.UNCERTAIN
     regime_confidence: float = 0.0
+    analysis_conviction: float = 0.0
+    analysis_support: float = 0.0
+    analysis_adjustment: float = 1.0
     reasons: list[str] = field(default_factory=list)
     rejection_reason: str = ""
     timestamp: datetime | None = None
@@ -116,7 +124,16 @@ class SignalEnsemble:
         regime: RegimeState,
         min_model_probability: float,
         timestamp: datetime | None = None,
+        analysis: "AnalysisReport | None" = None,
+        analysis_config: AnalysisConfig | None = None,
     ) -> EnsembleResult:
+        """Combine strategy signals, the model and the deep analysis into one call.
+
+        The analysis layer is evidence, not an override: it can veto, it can
+        scale the score within the bounds `analysis_config.influence` allows,
+        and it can refuse a direction it actively opposes. It cannot manufacture
+        a trade the strategies and the model did not already agree on.
+        """
         timestamp = timestamp or datetime.now()
 
         actionable = [s for s in signals if s.is_actionable]
@@ -202,12 +219,58 @@ class SignalEnsemble:
             ml_component = 0.35
             reasons.append(f"no usable ML prediction ({reason}); strategy-only evidence")
 
+        # --- deep-analysis gate (aqtp.analysis) --------------------------------
+        analysis_support = 0.0
+        analysis_conviction = 0.0
+        analysis_adjustment = 1.0
+        if analysis is not None:
+            settings = analysis_config or AnalysisConfig()
+            analysis_conviction = analysis.conviction
+            analysis_support = analysis.supports(direction)
+
+            if settings.veto_enabled and analysis.vetoed:
+                return no_trade(
+                    "analysis veto: " + "; ".join(analysis.vetoes),
+                    timestamp=timestamp, regime=regime,
+                )
+            if settings.require_direction_agreement and analysis.bias not in (
+                direction, Direction.FLAT
+            ):
+                return no_trade(
+                    f"deep analysis reads {analysis.bias.value} against a {direction.value} "
+                    f"signal (net {analysis.confluence.net_score:+.2f}, "
+                    f"conflicting: {', '.join(analysis.confluence.conflicting) or 'none'})",
+                    timestamp=timestamp, regime=regime,
+                )
+            if analysis_conviction < settings.min_conviction:
+                return no_trade(
+                    f"analysis conviction {analysis_conviction:.2f} below the "
+                    f"{settings.min_conviction:.2f} minimum "
+                    f"(alignment {analysis.confluence.alignment:.0%} across "
+                    f"{len(analysis.confluence.dimensions)} dimensions)",
+                    timestamp=timestamp, regime=regime,
+                )
+
+            # Map support in [0, 1] onto a multiplier centred on 1.0. With the
+            # default influence of 0.5 a fully-supported signal is scaled by 1.5
+            # and an unsupported one by 0.5 — enough to reorder the scan, not
+            # enough to overrule the gates above.
+            analysis_adjustment = 1.0 + settings.influence * (2.0 * analysis_support - 1.0)
+            reasons.append(
+                f"analysis conviction {analysis_conviction:.2f}, support for "
+                f"{direction.value} {analysis_support:.2f} "
+                f"(x{analysis_adjustment:.2f} on score) — agreeing: "
+                f"{', '.join(analysis.confluence.agreeing) or 'none'}"
+            )
+            for warning in analysis.confluence.warnings[:2]:
+                reasons.append(f"analysis warning: {warning}")
+
         strategy_component = float(np.clip(winning / max(len(agreeing), 1), 0.0, 1.0))
 
         score = (
             self.config.strategy_weight * strategy_component
             + self.config.ml_weight * ml_component
-        )
+        ) * analysis_adjustment
         confidence = self._confidence(
             strategy_component=strategy_component,
             agreement=agreement,
@@ -251,6 +314,9 @@ class SignalEnsemble:
             expected_holding_minutes=levels["holding_minutes"],
             regime=regime.dominant,
             regime_confidence=regime.confidence,
+            analysis_conviction=analysis_conviction,
+            analysis_support=analysis_support,
+            analysis_adjustment=analysis_adjustment,
             reasons=reasons,
             timestamp=timestamp,
         )

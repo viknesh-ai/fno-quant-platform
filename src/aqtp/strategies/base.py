@@ -15,7 +15,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 import numpy as np
 import pandas as pd
@@ -24,6 +24,9 @@ from ..core.logging import get_logger
 from ..core.types import Direction, Instrument, Regime, Timeframe
 from ..features.options_features import OptionChainFeatures
 from ..regime.engine import RegimeState, regime_fit
+
+if TYPE_CHECKING:
+    from ..analysis.engine import AnalysisReport
 
 logger = get_logger(__name__)
 
@@ -45,6 +48,7 @@ class StrategyContext:
     regime_timeframe: Timeframe
     atr: float
     option_features: OptionChainFeatures | None = None
+    analysis: "AnalysisReport | None" = None
     days_to_expiry: int | None = None
     session_context: Mapping[str, float] = field(default_factory=dict)
 
