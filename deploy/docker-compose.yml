@@ -1,0 +1,38 @@
+# Unattended production run.
+#
+#   docker compose -f deploy/docker-compose.yml up -d
+#   docker compose -f deploy/docker-compose.yml logs -f
+#   docker compose -f deploy/docker-compose.yml exec aqtp aqtp status
+#
+# `stop_grace_period` must exceed runtime.shutdown_grace_seconds, or Docker will
+# SIGKILL the process mid-shutdown and leave orders resting at the broker.
+
+services:
+  aqtp:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: aqtp:latest
+    container_name: aqtp
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      TZ: Asia/Kolkata
+      # The shipped config binds the dashboard to 127.0.0.1, which inside a
+      # container is unreachable from the host. Bind it to the container's own
+      # interface instead; the port mapping below keeps it off the network.
+      AQTP_MONITORING__DASHBOARD_HOST: "0.0.0.0"
+    command: ["start", "--config", "config/default.yaml", "--yes"]
+    volumes:
+      - ../data:/app/data
+      - ../config:/app/config:ro
+    ports:
+      - "127.0.0.1:8787:8787"
+    stop_signal: SIGTERM
+    stop_grace_period: 120s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"

@@ -1,14 +1,16 @@
 # =============================================================================
-# AQTP default configuration.
+# AQTP default configuration — PRODUCTION.
 #
-# PAPER is the default mode. LIVE cannot be enabled from this file alone — it
-# additionally requires three environment interlocks (see .env.example).
+# mode: LIVE is the default. This is a real-money trading system and the config
+# is tuned for it. LIVE still cannot be entered from this file alone: the three
+# environment interlocks in .env.example must also be set (run `aqtp arm` to see
+# them). Set `mode: PAPER` here for a dry run against real data.
 #
 # Nothing here is baked into the code: change a value, restart, and the system
 # behaves differently. Every field is validated at startup.
 # =============================================================================
 
-mode: PAPER
+mode: LIVE
 run_name: default
 log_level: INFO
 json_logs: false
@@ -180,6 +182,73 @@ strategy_health:
 scanner:
   min_opportunity_score: 0.60
   max_opportunities_per_cycle: 5
+  weights:
+    strategy: 0.20
+    ml: 0.20
+    analysis: 0.20        # the deep-analysis confluence score
+    regime_fit: 0.12
+    liquidity: 0.12
+    expected_return: 0.08
+    execution_quality: 0.08
+
+# --- Deep analysis (src/aqtp/analysis) ---------------------------------------
+# Eight independent reads of the market, combined into one conviction with a
+# full audit trail. `aqtp analyze NIFTY` prints the whole thing.
+analysis:
+  enabled: true
+  benchmark: NIFTY
+  vix_symbol: INDIAVIX
+
+  dimension_weights:
+    trend: 0.16          # multi-timeframe direction: ADX/DI, EMA structure, VWAP
+    momentum: 0.14       # RSI, MACD, ROC, acceleration, OBV
+    structure: 0.14      # volume profile: POC, value area, break of structure
+    orderflow: 0.16      # book imbalance, order-flow imbalance, tape delta
+    positioning: 0.14    # dealer gamma, OI walls, skew, max pain
+    statistical: 0.10    # Hurst, variance ratio, entropy, efficiency ratio
+    volatility: 0.08     # expansion/contraction, GARCH forecast, squeeze
+    crossasset: 0.08     # correlation, breadth, dispersion, India VIX
+  min_dimensions: 4      # fewer than this reporting caps conviction
+  conflict_penalty: 0.5  # how hard disagreeing dimensions cut conviction
+
+  min_conviction: 0.20   # below this the analysis blocks the trade
+  influence: 0.50        # how much the analysis may move an ensemble score
+  veto_enabled: true
+  require_direction_agreement: true
+
+  volume_profile_bins: 60
+  value_area_pct: 0.70
+  microstructure_history: 120
+  statistical_lookback_bars: 240
+
+  # Hard vetoes — these mean "do not trade", not "trade smaller".
+  max_spread_pct: 0.02
+  max_jump_sigmas: 5.0
+  min_tradability: 0.15
+  max_pin_risk: 0.75
+  max_quote_age_seconds: 20.0
+
+# --- Production runtime -------------------------------------------------------
+runtime:
+  fast_loop_seconds: 2.0            # position management cadence
+  idle_loop_seconds: 15.0           # cadence outside the trading window
+  position_check_seconds: 2.0
+  heartbeat_seconds: 30.0
+
+  max_consecutive_cycle_errors: 10
+  reconnect_backoff_seconds: 2.0
+  reconnect_max_backoff_seconds: 60.0
+  max_reconnect_attempts: 20
+  watchdog_timeout_seconds: 180.0
+  watchdog_action: halt             # alert | halt | flatten
+
+  square_off_on_shutdown: false
+  cancel_open_orders_on_shutdown: true
+  shutdown_grace_seconds: 20.0
+
+  pid_file: data/aqtp.pid
+  state_snapshot_seconds: 60.0
+  auto_square_off_before_close: true
 
 monitoring:
   dashboard_enabled: true

@@ -303,6 +303,10 @@ def config(tmp_path) -> AppConfig:
     cfg = load_config(
         "config/default.yaml",
         overrides={
+            # The shipped config defaults to LIVE. Tests must never depend on the
+            # LIVE interlocks being present in the environment, so the fixture
+            # pins PAPER; the mode tests below load the file unmodified.
+            "mode": "PAPER",
             "paths": {
                 "data_dir": str(tmp_path),
                 "cache_dir": str(tmp_path / "cache"),

@@ -24,6 +24,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .analysis.engine import AnalysisEngine, AnalysisReport
 from .brokers.base import BrokerAdapter, Capability
 from .configuration.loader import Credentials
 from .configuration.schema import AppConfig
@@ -126,6 +127,7 @@ class TradingOrchestrator:
         self.prediction = prediction_engine or PredictionEngine(config.prediction)
         self.ensemble = SignalEnsemble(config.ensemble, health_monitor=self.health)
         self.scanner = OpportunityScanner(config.scanner)
+        self.analysis = AnalysisEngine(config.analysis)
         self.option_selector = OptionSelector(config.option_selection)
         self.iv_history = IVHistory()
 
@@ -385,6 +387,11 @@ class TradingOrchestrator:
         snapshot = self.market_data.build_snapshot(instruments, chains_for=chains_wanted)
         report.data_rejected = len(snapshot.rejected)
 
+        # Cross-asset context is built once per cycle, before any symbol is
+        # scored, so that every symbol is judged against the same market state.
+        if self.config.analysis.enabled:
+            self._build_market_context(snapshot, now)
+
         for symbol, instrument_snapshot in snapshot.instruments.items():
             underlying = self._underlying_for(symbol)
             if underlying is None:
@@ -452,6 +459,43 @@ class TradingOrchestrator:
 
         days_to_expiry = (expiries[0] - to_ist(now).date()).days if expiries else None
 
+        # --- deep analysis (aqtp.analysis) ------------------------------------
+        # Eight independent reads of the market — order flow, volume structure,
+        # dealer positioning, statistical character, cross-asset backdrop —
+        # combined into one conviction with an audit trail. It runs before the
+        # strategies so they can see it, and it is re-checked by the ensemble.
+        analysis: AnalysisReport | None = None
+        if self.config.analysis.enabled:
+            iv_rank = None
+            previous_atm_iv = None
+            if option_features is not None and option_features.atm_iv:
+                iv_rank = self.iv_history.percentile(underlying, option_features.atm_iv)
+                change = self.iv_history.change(underlying, option_features.atm_iv)
+                if change is not None:
+                    previous_atm_iv = option_features.atm_iv - change
+            try:
+                analysis = self.analysis.analyze(
+                    underlying=underlying,
+                    timestamp=now,
+                    quote=instrument_snapshot.quote,
+                    frames=frames,
+                    features_by_timeframe=features_by_timeframe,
+                    entry_timeframe=self._entry_timeframe,
+                    setup_timeframe=self._setup_timeframe,
+                    regime_timeframe=self._regime_timeframe,
+                    chains=chains,
+                    lot_size=self._lot_size_for(underlying),
+                    iv_rank=iv_rank,
+                    previous_atm_iv=previous_atm_iv,
+                    quote_age_seconds=(
+                        now - instrument_snapshot.quote.timestamp
+                    ).total_seconds(),
+                )
+            except Exception as exc:
+                # Analysis is evidence, not plumbing: losing it degrades the
+                # decision, it does not stop the cycle.
+                logger.exception("analysis failed for %s: %s", underlying, exc)
+
         # --- regime (REQ 11) --------------------------------------------------
         regime_features = features_by_timeframe.get(self._regime_timeframe, entry_features)
         event_window = self.event_risk.assess(now, underlying=underlying)
@@ -477,6 +521,7 @@ class TradingOrchestrator:
             regime_timeframe=self._regime_timeframe,
             atr=atr,
             option_features=option_features,
+            analysis=analysis,
             days_to_expiry=days_to_expiry,
             session_context={
                 "minutes_until_close": minutes_until_close(now),
@@ -512,6 +557,8 @@ class TradingOrchestrator:
             regime=regime,
             min_model_probability=self.config.prediction.min_model_probability,
             timestamp=now,
+            analysis=analysis,
+            analysis_config=self.config.analysis,
         )
 
         return self.scanner.score(
@@ -523,6 +570,7 @@ class TradingOrchestrator:
             instrument=instrument_snapshot.instrument,
             available_capital=self._equity,
             timestamp=now,
+            analysis=analysis,
         )
 
     # ------------------------------------------------------------------ #
@@ -939,6 +987,38 @@ class TradingOrchestrator:
                 wanted[name] = expiries[0]
         return wanted
 
+    def _build_market_context(self, snapshot: MarketSnapshot, now: datetime) -> None:
+        """Feed the cross-asset tracker and rebuild the market-wide report.
+
+        Breadth and relative strength are day-level measures, so they come from
+        each symbol's return since the open rather than from the bar series.
+        """
+        session_returns: dict[str, float] = {}
+        above_vwap: dict[str, bool] = {}
+
+        for symbol, instrument_snapshot in snapshot.instruments.items():
+            underlying = self._underlying_for(symbol)
+            if underlying is None or not instrument_snapshot.usable:
+                continue
+            price = instrument_snapshot.last_price
+            self.analysis.observe_market(underlying, price)
+
+            context = instrument_snapshot.context
+            if context.previous_close and context.previous_close > 0:
+                session_returns[underlying] = (price - context.previous_close) / context.previous_close
+            if context.vwap:
+                above_vwap[underlying] = price > context.vwap
+
+            if underlying.upper() == self.config.analysis.vix_symbol.upper():
+                self.analysis.observe_vix(price)
+
+        try:
+            self.analysis.build_market_context(
+                timestamp=now, session_returns=session_returns, above_vwap=above_vwap
+            )
+        except Exception as exc:
+            logger.warning("cross-asset context failed: %s", exc)
+
     def _refresh_equity(self) -> None:
         margin = self._margin()
         equity, source = effective_equity(self.config.capital, margin)
@@ -1111,6 +1191,7 @@ class TradingOrchestrator:
             "strategy_health": self.health.summary(),
             "prediction_engine": self.prediction.health(),
             "market_data": self.market_data.health(),
+            "analysis": self._analysis_status(),
             "latency": self.latency.statistics(),
             "last_cycle": self.last_cycle.summary() if self.last_cycle else None,
             "last_reconciliation": (
@@ -1118,3 +1199,39 @@ class TradingOrchestrator:
             ),
             "alerts": self.alerts.summary(),
         }
+
+    def _analysis_status(self) -> dict[str, Any]:
+        """What the analysis layer currently sees, for the dashboard and CLI."""
+        if not self.config.analysis.enabled:
+            return {"enabled": False}
+        market = self.analysis.crossasset.last_report
+        out: dict[str, Any] = {
+            "enabled": True,
+            "symbols_tracked": market.symbols_tracked if market else 0,
+            "market_regime": market.regime if market else None,
+            "breadth": round(market.breadth, 3) if market and market.breadth is not None else None,
+            "average_correlation": (
+                round(market.average_correlation, 3)
+                if market and market.average_correlation is not None else None
+            ),
+            "vix": market.vix if market else None,
+        }
+        recent = [
+            report for report in (
+                self.analysis.last(name) for name in (self.universe.symbols() if self.universe else [])
+            ) if report is not None
+        ]
+        if recent:
+            ranked = sorted(recent, key=lambda r: r.conviction, reverse=True)[:5]
+            out["top_conviction"] = [
+                {
+                    "underlying": r.underlying,
+                    "bias": r.bias.value,
+                    "conviction": round(r.conviction, 3),
+                    "net_score": round(r.confluence.net_score, 3),
+                    "vetoed": r.vetoed,
+                }
+                for r in ranked
+            ]
+            out["vetoed"] = sum(1 for r in recent if r.vetoed)
+        return out

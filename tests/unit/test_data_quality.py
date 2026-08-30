@@ -246,12 +246,28 @@ class TestOptionSelector:
 # Configuration (REQ 58)
 # =========================================================================== #
 class TestConfiguration:
-    def test_default_config_is_valid(self):
-        config = load_config("config/default.yaml", use_env=False, dotenv_path=None)
-        assert config.mode is TradingMode.PAPER
+    def test_default_config_is_valid(self, monkeypatch):
+        """The shipped config is LIVE, so validating it needs the interlocks."""
+        from aqtp.configuration.schema import LIVE_INTERLOCKS
 
-    def test_paper_is_the_default_mode(self):
+        for key, value in LIVE_INTERLOCKS.items():
+            monkeypatch.setenv(key, value)
         config = load_config("config/default.yaml", use_env=False, dotenv_path=None)
+        assert config.mode is TradingMode.LIVE
+
+    def test_live_is_the_shipped_default_mode(self, monkeypatch):
+        """This is a production platform: LIVE is what config/default.yaml says."""
+        import yaml
+
+        with open("config/default.yaml") as handle:
+            raw = yaml.safe_load(handle)
+        assert raw["mode"] == "LIVE"
+
+    def test_paper_is_still_reachable_and_never_submits_real_orders(self):
+        config = load_config(
+            "config/default.yaml", overrides={"mode": "PAPER"},
+            use_env=False, dotenv_path=None,
+        )
         assert config.mode is TradingMode.PAPER
         assert not config.submits_real_orders
 
